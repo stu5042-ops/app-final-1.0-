@@ -473,7 +473,19 @@ var CAL_COLOR_MAP_ = {
       state.schoolItems.forEach(function (it) {
         dateRange(it.date, it.end_date).forEach(function (d) {
           if (!map[d]) map[d] = [];
-          map[d].push({ id: 'sch-' + d + '-' + it.title, __school: true, title: it.title, date: it.date, end_date: it.end_date, color: 'emerald' });
+          map[d].push({
+            id: it.id,
+            school_schedule_id: it.school_schedule_id || it.id,
+            override_id: it.override_id || null,
+            __school: true,
+            title: it.title,
+            date: it.date,
+            end_date: it.end_date,
+            start_time: it.start_time || null,
+            end_time: it.end_time || null,
+            description: it.description || null,
+            color: it.color || 'emerald'
+          });
         });
       });
       return map;
