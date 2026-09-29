@@ -79,9 +79,20 @@ async function schoolContext(admin, user) {
     const { data, error } = await admin.from('schools').select('*').eq('active', true).order('name').limit(1).single();
     if (error) throw error;
     school = data;
-    await admin.from('profiles').update({ school_id: school.id, updated_at: new Date().toISOString() }).eq('id', user.id);
+    if (profile) {
+      const { error: updateError } = await admin.from('profiles').update({ school_id: school.id, updated_at: new Date().toISOString() }).eq('id', user.id);
+      if (updateError) throw updateError;
+    } else {
+      const { error: insertError } = await admin.from('profiles').insert({
+        id: user.id,
+        display_name: user.user_metadata?.display_name || user.email?.split('@')[0] || '',
+        school_id: school.id,
+        theme: 'light',
+      });
+      if (insertError && insertError.code !== '23505') throw insertError;
+    }
   }
-  return { profile: profile || { id: user.id, school_id: school.id }, school };
+  return { profile: profile || { id: user.id, school_id: school.id, theme: 'light' }, school };
 }
 
 async function cachedFetch(key, forceRefresh, ttlMs, liveFn) {
@@ -320,9 +331,21 @@ async function getScheduleDb(admin, schoolId, userId, forceRefresh, school) {
   if (error) throw error;
   const stale = isStale(rows || [], 12 * 3600000);
   if (forceRefresh || stale) {
-    const live = await getSchoolScheduleLive(school);
+    let live;
+    try {
+      live = await getSchoolScheduleLive(school);
+    } catch (error) {
+      // Keep usable DB data when the school website is temporarily unavailable.
+      if (rows && rows.length) {
+        return applyScheduleOverrides(admin, rows, userId, true);
+      }
+      throw error;
+    }
     const now = new Date().toISOString();
-    await admin.from('school_schedules').update({ active: false, updated_at: now }).eq('school_id', schoolId);
+    if (!live.items.length && rows && rows.length) {
+      return applyScheduleOverrides(admin, rows, userId, true);
+    }
+    { const { error: deactivateError } = await admin.from('school_schedules').update({ active: false, updated_at: now }).eq('school_id', schoolId); if (deactivateError) throw deactivateError; }
     const upsertRows = live.items.map((it) => ({
       school_id: schoolId,
       source_key: `${it.title}|${it.date}|${it.end_date || ''}`,
@@ -346,10 +369,18 @@ async function getScheduleDb(admin, schoolId, userId, forceRefresh, school) {
     rows = refreshed.data || [];
   }
 
+  return applyScheduleOverrides(admin, rows || [], userId, !forceRefresh && !stale);
+}
+
+async function applyScheduleOverrides(admin, rows, userId, cached) {
   const ids = (rows || []).map((r) => r.id);
   let overrides = [];
   if (ids.length) {
-    const { data, error: overrideError } = await admin.from('school_event_overrides').select('*').eq('user_id', userId).in('school_schedule_id', ids);
+    const { data, error: overrideError } = await admin
+      .from('school_event_overrides')
+      .select('*')
+      .eq('user_id', userId)
+      .in('school_schedule_id', ids);
     if (overrideError) throw overrideError;
     overrides = data || [];
   }
@@ -371,7 +402,7 @@ async function getScheduleDb(admin, schoolId, userId, forceRefresh, school) {
       deleted: !!o?.deleted,
     };
   }).filter((r) => !r.deleted);
-  return { year: new Date().getFullYear(), items, cached: !forceRefresh && !stale };
+  return { year: new Date().getFullYear(), items, cached };
 }
 
 async function getMealDb(admin, schoolId, forceRefresh, school) {
@@ -379,9 +410,18 @@ async function getMealDb(admin, schoolId, forceRefresh, school) {
   if (error) throw error;
   const stale = isStale(rows || [], 12 * 3600000);
   if (forceRefresh || stale) {
-    const live = await getSchoolMealLive(school);
+    let live;
+    try {
+      live = await getSchoolMealLive(school);
+    } catch (error) {
+      if (rows && rows.length) return { days: rows.map((r) => ({ date: r.meal_date, breakfast: r.breakfast, lunch: r.lunch, dinner: r.dinner, snack: r.snack })), cached: true };
+      throw error;
+    }
+    if (!live.days.length && rows && rows.length) {
+      return { days: rows.map((r) => ({ date: r.meal_date, breakfast: r.breakfast, lunch: r.lunch, dinner: r.dinner, snack: r.snack })), cached: true };
+    }
     const now = new Date().toISOString();
-    await admin.from('school_meals').update({ active: false, updated_at: now }).eq('school_id', schoolId);
+    { const { error: deactivateError } = await admin.from('school_meals').update({ active: false, updated_at: now }).eq('school_id', schoolId); if (deactivateError) throw deactivateError; }
     const upserts = live.days.map((d) => ({
       school_id: schoolId,
       meal_date: d.date,
@@ -409,9 +449,18 @@ async function getNoticeDb(admin, schoolId, forceRefresh, school) {
   if (error) throw error;
   const stale = isStale(rows || [], 6 * 3600000);
   if (forceRefresh || stale) {
-    const live = await getSchoolNoticesLive(school);
+    let live;
+    try {
+      live = await getSchoolNoticesLive(school);
+    } catch (error) {
+      if (rows && rows.length) return { items: rows.map((r) => ({ title: r.title, link: r.link, date: r.notice_date })), cached: true };
+      throw error;
+    }
+    if (!live.items.length && rows && rows.length) {
+      return { items: rows.map((r) => ({ title: r.title, link: r.link, date: r.notice_date })), cached: true };
+    }
     const now = new Date().toISOString();
-    await admin.from('school_notices').update({ active: false, updated_at: now }).eq('school_id', schoolId);
+    { const { error: deactivateError } = await admin.from('school_notices').update({ active: false, updated_at: now }).eq('school_id', schoolId); if (deactivateError) throw deactivateError; }
     const upserts = live.items.map((n) => ({
       school_id: schoolId,
       source_key: `${n.date}|${n.link}|${n.title}`,
